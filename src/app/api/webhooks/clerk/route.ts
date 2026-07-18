@@ -2,8 +2,7 @@ import { headers } from "next/headers";
 import { NextResponse } from "next/server";
 import { Webhook } from "svix";
 
-import { prisma } from "@/lib/prisma";
-import { getDefaultOrganization } from "@/lib/organization";
+import { syncUserFromClerk, type ClerkUserLike } from "@/lib/sync-user";
 
 /**
  * Syncs Clerk users into our local `User` table so the rest of the app can
@@ -11,8 +10,12 @@ import { getDefaultOrganization } from "@/lib/organization";
  *
  * Configure this endpoint's URL + signing secret in the Clerk dashboard
  * (Webhooks) as CLERK_WEBHOOK_SECRET. New users default to the BORROWER
- * role; promote admins/lenders from the Settings > Team page (or by editing
- * ADMIN_EMAILS below) after they sign up.
+ * role; ADMIN_EMAILS controls who gets auto-promoted to ADMIN on sign-up.
+ *
+ * This is the steady-state sync path — `getCurrentUser()` in lib/auth.ts
+ * also does this same sync inline as a fallback, since webhook delivery is
+ * asynchronous and can otherwise race a client that's redirected to a
+ * protected page immediately after signing up.
  */
 export async function POST(req: Request) {
   const webhookSecret = process.env.CLERK_WEBHOOK_SECRET;
@@ -32,18 +35,7 @@ export async function POST(req: Request) {
   const body = await req.text();
   const wh = new Webhook(webhookSecret);
 
-  let event: {
-    type: string;
-    data: {
-      id: string;
-      email_addresses?: { id: string; email_address: string }[];
-      primary_email_address_id?: string;
-      first_name?: string | null;
-      last_name?: string | null;
-      image_url?: string | null;
-      phone_numbers?: { phone_number: string }[];
-    };
-  };
+  let event: { type: string; data: ClerkUserLike };
 
   try {
     event = wh.verify(body, {
@@ -56,43 +48,10 @@ export async function POST(req: Request) {
   }
 
   if (event.type === "user.created" || event.type === "user.updated") {
-    const { id, email_addresses, primary_email_address_id, first_name, last_name, image_url, phone_numbers } =
-      event.data;
-    const primaryEmail =
-      email_addresses?.find((e) => e.id === primary_email_address_id)?.email_address ??
-      email_addresses?.[0]?.email_address;
-
-    if (!primaryEmail) {
+    const user = await syncUserFromClerk(event.data);
+    if (!user) {
       return NextResponse.json({ error: "User has no email address" }, { status: 400 });
     }
-
-    const adminEmails = (process.env.ADMIN_EMAILS ?? "")
-      .split(",")
-      .map((e) => e.trim().toLowerCase())
-      .filter(Boolean);
-
-    const org = await getDefaultOrganization();
-
-    await prisma.user.upsert({
-      where: { clerkId: id },
-      update: {
-        email: primaryEmail,
-        firstName: first_name ?? undefined,
-        lastName: last_name ?? undefined,
-        avatarUrl: image_url ?? undefined,
-        phone: phone_numbers?.[0]?.phone_number ?? undefined,
-      },
-      create: {
-        clerkId: id,
-        email: primaryEmail,
-        firstName: first_name ?? undefined,
-        lastName: last_name ?? undefined,
-        avatarUrl: image_url ?? undefined,
-        phone: phone_numbers?.[0]?.phone_number ?? undefined,
-        role: adminEmails.includes(primaryEmail.toLowerCase()) ? "ADMIN" : "BORROWER",
-        organizationId: org.id,
-      },
-    });
   }
 
   // Note: user.deleted is intentionally a no-op. Hard-deleting would cascade

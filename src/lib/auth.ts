@@ -1,16 +1,29 @@
 import "server-only";
 
-import { auth } from "@clerk/nextjs/server";
+import { auth, clerkClient } from "@clerk/nextjs/server";
 import { redirect } from "next/navigation";
 import type { Role } from "@prisma/client";
 
 import { prisma } from "@/lib/prisma";
+import { syncUserFromClerk } from "@/lib/sync-user";
 
-/** Loads the local `User` row (with our role + org) for the signed-in Clerk session, if any. */
+/**
+ * Loads the local `User` row (with our role + org) for the signed-in Clerk
+ * session, if any. If Clerk has authenticated this session but our webhook
+ * hasn't synced a local row yet (webhook delivery is async and can race a
+ * client redirected here immediately after signing up), fetch the user from
+ * Clerk directly and sync it inline rather than bouncing them back out.
+ */
 export async function getCurrentUser() {
   const { userId } = await auth();
   if (!userId) return null;
-  return prisma.user.findUnique({ where: { clerkId: userId } });
+
+  const existing = await prisma.user.findUnique({ where: { clerkId: userId } });
+  if (existing) return existing;
+
+  const client = await clerkClient();
+  const clerkUser = await client.users.getUser(userId);
+  return syncUserFromClerk(clerkUser);
 }
 
 /** For Server Components/pages: redirects to sign-in if unauthenticated. */
