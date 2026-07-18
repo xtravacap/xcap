@@ -58,17 +58,26 @@ export async function syncUserFromClerk(clerkUser: ClerkUserLike) {
     .filter(Boolean);
 
   const org = await getDefaultOrganization();
+  const profileFields = { email: primaryEmail, firstName, lastName, avatarUrl, phone };
 
-  return prisma.user.upsert({
-    where: { clerkId: clerkUser.id },
-    update: { email: primaryEmail, firstName, lastName, avatarUrl, phone },
-    create: {
+  const existingByClerkId = await prisma.user.findUnique({ where: { clerkId: clerkUser.id } });
+  if (existingByClerkId) {
+    return prisma.user.update({ where: { id: existingByClerkId.id }, data: profileFields });
+  }
+
+  // A row with this email but a *different* (stale) clerkId can exist — e.g. seed
+  // data, or a leftover row from deleting/recreating a Clerk test account. `email`
+  // is globally unique, so blindly creating here would throw a P2002; instead,
+  // claim that row for this real Clerk account rather than crashing.
+  const existingByEmail = await prisma.user.findUnique({ where: { email: primaryEmail } });
+  if (existingByEmail) {
+    return prisma.user.update({ where: { id: existingByEmail.id }, data: { clerkId: clerkUser.id, ...profileFields } });
+  }
+
+  return prisma.user.create({
+    data: {
+      ...profileFields,
       clerkId: clerkUser.id,
-      email: primaryEmail,
-      firstName,
-      lastName,
-      avatarUrl,
-      phone,
       role: adminEmails.includes(primaryEmail.toLowerCase()) ? "ADMIN" : "BORROWER",
       organizationId: org.id,
     },
