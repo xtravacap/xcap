@@ -3,6 +3,7 @@ import { ArrowRight, Building2, LineChart, ShieldCheck, Sparkles } from "lucide-
 
 import { Button } from "@/components/ui/button";
 import { Card, CardContent, CardHeader, CardTitle, CardDescription } from "@/components/ui/card";
+import { LogoMark } from "@/components/brand/logo-mark";
 
 const FEATURES = [
   {
@@ -33,9 +34,7 @@ export default function Home() {
     <div className="flex flex-1 flex-col">
       <header className="flex h-16 items-center justify-between px-6 lg:px-10">
         <div className="flex items-center gap-2 font-semibold">
-          <div className="bg-primary text-primary-foreground flex size-8 items-center justify-center rounded-lg">
-            X
-          </div>
+          <LogoMark size={32} />
           Xtrava Capital
         </div>
         <div className="flex items-center gap-2">

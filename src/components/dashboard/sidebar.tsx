@@ -2,10 +2,10 @@
 
 import Link from "next/link";
 import { usePathname } from "next/navigation";
-import { Landmark } from "lucide-react";
 
 import { cn } from "@/lib/utils";
 import type { NavItem } from "@/lib/nav";
+import { LogoMark } from "@/components/brand/logo-mark";
 
 export function DashboardSidebar({ items }: { items: NavItem[] }) {
   const pathname = usePathname();
@@ -13,9 +13,7 @@ export function DashboardSidebar({ items }: { items: NavItem[] }) {
   return (
     <aside className="bg-sidebar text-sidebar-foreground border-sidebar-border hidden w-64 shrink-0 flex-col border-r lg:flex">
       <div className="flex h-16 items-center gap-2 px-6">
-        <div className="bg-sidebar-primary text-sidebar-primary-foreground flex size-8 items-center justify-center rounded-lg">
-          <Landmark className="size-4.5" />
-        </div>
+        <LogoMark size={32} />
         <div className="leading-tight">
           <p className="text-sm font-semibold">Xtrava Capital</p>
           <p className="text-sidebar-foreground/60 text-[11px]">Lender Matching</p>
