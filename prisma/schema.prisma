@@ -1,0 +1,501 @@
+// Xtrava Capital — Lender Matching Platform
+// Prisma schema: normalized PostgreSQL data model.
+//
+// Design notes:
+// - `Organization` exists from day one so the platform can flip to multi-tenant
+//   SaaS later without a schema rewrite; every tenant-scoped model carries an
+//   `organizationId`, and a single "Xtrava Capital" org is seeded for now.
+// - `Lender` carries both structured tag arrays (loanTypes/propertyTypes/states)
+//   for fast search, *and* explicit boolean capability flags (allowsBridge,
+//   allowsDscr, ...) mirroring the exact checklist product asked for on the
+//   lender profile UI. The matching engine reads the booleans; search/filtering
+//   reads the arrays.
+// - `Match` is keyed on (loanRequest, loanProgram) — the actual unit the
+//   scoring engine compares — with `lenderId` denormalized onto the row so
+//   lender-level dashboards/indexes don't need a join through LoanProgram.
+
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
+
+// ---------------------------------------------------------------------------
+// Enums
+// ---------------------------------------------------------------------------
+
+enum Role {
+  ADMIN
+  LENDER
+  BORROWER
+}
+
+enum LoanType {
+  BRIDGE
+  DSCR
+  CONSTRUCTION
+  GROUND_UP
+  FIX_AND_FLIP
+  PERMANENT
+  MEZZANINE
+  VALUE_ADD
+  RENTAL_PORTFOLIO
+  MIXED_USE_FINANCING
+}
+
+enum PropertyType {
+  MULTIFAMILY
+  MIXED_USE
+  RETAIL
+  OFFICE
+  INDUSTRIAL
+  SELF_STORAGE
+  HOSPITALITY
+  LAND
+  SINGLE_FAMILY
+  WAREHOUSE
+  MEDICAL
+  OTHER
+}
+
+enum RecourseType {
+  RECOURSE
+  NON_RECOURSE
+  EITHER
+}
+
+enum LoanPurpose {
+  PURCHASE
+  REFINANCE
+  CASH_OUT
+  CONSTRUCTION
+  BRIDGE
+  DSCR
+  FIX_AND_FLIP
+  GROUND_UP
+}
+
+enum OccupancyType {
+  OWNER_OCCUPIED
+  TENANT_OCCUPIED
+  VACANT
+  MIXED
+}
+
+enum RequestStatus {
+  SUBMITTED
+  UNDER_REVIEW
+  MATCHED
+  INTRODUCED
+  IN_UNDERWRITING
+  CLOSED_WON
+  CLOSED_LOST
+  WITHDRAWN
+}
+
+enum MatchStatus {
+  SUGGESTED
+  APPROVED
+  REJECTED
+  INTRODUCED
+  RESPONDED
+  DECLINED_BY_LENDER
+  FUNDED
+}
+
+enum DocumentType {
+  PURCHASE_CONTRACT
+  RENT_ROLL
+  FINANCIALS
+  TAX_RETURNS
+  BANK_STATEMENTS
+  APPRAISAL
+  PHOTOS
+  EXECUTIVE_SUMMARY
+  OPERATING_STATEMENT
+  LENDER_MATRIX
+  LENDER_GUIDELINES
+  OTHER
+}
+
+enum ExtractionStatus {
+  NOT_APPLICABLE
+  PENDING
+  PROCESSING
+  COMPLETED
+  FAILED
+}
+
+enum NotificationType {
+  SUBMISSION_RECEIVED
+  LENDER_MATCHED
+  DOCUMENT_UPLOADED
+  STATUS_CHANGED
+  ADMIN_COMMENT
+}
+
+// ---------------------------------------------------------------------------
+// Tenancy & identity
+// ---------------------------------------------------------------------------
+
+model Organization {
+  id        String   @id @default(cuid())
+  name      String
+  slug      String   @unique
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  users     User[]
+  lenders   Lender[]
+  borrowers Borrower[]
+  activity  ActivityLog[]
+
+  @@map("organizations")
+}
+
+model User {
+  id             String       @id @default(cuid())
+  clerkId        String       @unique
+  email          String       @unique
+  firstName      String?
+  lastName       String?
+  phone          String?
+  avatarUrl      String?
+  role           Role         @default(BORROWER)
+  organizationId String
+  organization   Organization @relation(fields: [organizationId], references: [id])
+
+  // Optional 1:1 links to the domain profile matching this user's role.
+  lenderId   String?   @unique
+  lender     Lender?   @relation(fields: [lenderId], references: [id])
+  borrowerId String?   @unique
+  borrower   Borrower? @relation(fields: [borrowerId], references: [id])
+
+  uploadedDocuments Document[]     @relation("UploadedBy")
+  overriddenMatches Match[]        @relation("OverriddenBy")
+  comments          Comment[]
+  notifications     Notification[]
+  activity          ActivityLog[]
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  @@index([organizationId])
+  @@index([role])
+  @@map("users")
+}
+
+// ---------------------------------------------------------------------------
+// Lender & loan programs
+// ---------------------------------------------------------------------------
+
+model Lender {
+  id             String       @id @default(cuid())
+  organizationId String
+  organization   Organization @relation(fields: [organizationId], references: [id])
+
+  companyName    String
+  primaryContact String
+  email          String
+  phone          String?
+  website        String?
+  logoUrl        String?
+
+  // Tag arrays — used by search/filtering.
+  loanTypes     LoanType[]
+  propertyTypes PropertyType[]
+  states        String[]
+
+  // Deal-box economics.
+  minLoanAmount     Decimal      @db.Decimal(14, 2)
+  maxLoanAmount     Decimal      @db.Decimal(14, 2)
+  maxLtc            Float?
+  maxLtv            Float?
+  minDscr           Float?
+  minCreditScore    Int?
+  recourse          RecourseType @default(EITHER)
+  interestRateMin   Float?
+  interestRateMax   Float?
+  originationFeeMin Float?
+  originationFeeMax Float?
+
+  // Explicit capability checklist (mirrors the lender-profile UI 1:1).
+  allowsBridge       Boolean @default(false)
+  allowsDscr         Boolean @default(false)
+  allowsConstruction Boolean @default(false)
+  allowsGroundUp     Boolean @default(false)
+  allowsFixFlip      Boolean @default(false)
+  allowsMultifamily  Boolean @default(false)
+  allowsMixedUse     Boolean @default(false)
+  allowsRetail       Boolean @default(false)
+  allowsOffice       Boolean @default(false)
+  allowsIndustrial   Boolean @default(false)
+  allowsSelfStorage  Boolean @default(false)
+  allowsHospitality  Boolean @default(false)
+  allowsLand         Boolean @default(false)
+
+  preferredMarkets           String[]
+  requiredExperienceYears    Int?
+  sponsorNetWorthRequirement Decimal? @db.Decimal(14, 2)
+  liquidityRequirement       Decimal? @db.Decimal(14, 2)
+  entityRequirements         String?
+  prepaymentPenalty          String?
+  closingTimelineDays        Int?
+  notes                      String?
+
+  isActive Boolean @default(true)
+
+  user         User?
+  loanPrograms LoanProgram[]
+  matches      Match[]
+  documents    Document[]
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  @@index([organizationId])
+  @@index([minLoanAmount, maxLoanAmount])
+  @@map("lenders")
+}
+
+model LoanProgram {
+  id       String @id @default(cuid())
+  lenderId String
+  lender   Lender @relation(fields: [lenderId], references: [id], onDelete: Cascade)
+
+  programName String
+  loanType    LoanType
+  purposes    LoanPurpose[]
+
+  minLoanAmount      Decimal @db.Decimal(14, 2)
+  maxLoanAmount      Decimal @db.Decimal(14, 2)
+  minDscr            Float?
+  maxLtv             Float?
+  maxLtc             Float?
+  interestRateMin    Float?
+  interestRateMax    Float?
+  termMonths         Int?
+  amortizationMonths Int?
+  prepayment         String?
+  interestOnly       Boolean @default(false)
+
+  propertyTypes PropertyType[]
+  allowedStates String[]
+
+  isBridge          Boolean @default(false)
+  isPermanent       Boolean @default(false)
+  isConstruction    Boolean @default(false)
+  isValueAdd        Boolean @default(false)
+  isGroundUp        Boolean @default(false)
+  isFixFlip         Boolean @default(false)
+  isRentalPortfolio Boolean @default(false)
+  isCommercial      Boolean @default(false)
+  isResidential     Boolean @default(false)
+
+  isActive Boolean @default(true)
+
+  matches Match[]
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  @@index([lenderId])
+  @@index([loanType])
+  @@map("loan_programs")
+}
+
+// ---------------------------------------------------------------------------
+// Borrower & loan requests (the intake)
+// ---------------------------------------------------------------------------
+
+model Borrower {
+  id             String       @id @default(cuid())
+  organizationId String
+  organization   Organization @relation(fields: [organizationId], references: [id])
+
+  borrowerName    String
+  email           String
+  phone           String?
+  businessName    String?
+  entityType      String?
+  experienceYears Int?
+  creditScore     Int?
+  liquidity       Decimal? @db.Decimal(14, 2)
+  netWorth        Decimal? @db.Decimal(14, 2)
+
+  user         User?
+  loanRequests LoanRequest[]
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  @@unique([organizationId, email])
+  @@index([organizationId])
+  @@map("borrowers")
+}
+
+model LoanRequest {
+  id         String   @id @default(cuid())
+  borrowerId String
+  borrower   Borrower @relation(fields: [borrowerId], references: [id])
+
+  requestedLoanAmount Decimal  @db.Decimal(14, 2)
+  purchasePrice       Decimal? @db.Decimal(14, 2)
+  propertyValue       Decimal? @db.Decimal(14, 2)
+  ltv                 Float?
+  ltc                 Float?
+  dscr                Float?
+  noi                 Decimal? @db.Decimal(14, 2)
+  capRate             Float?
+
+  propertyAddress String
+  propertyCity    String?
+  propertyState   String
+  propertyZip     String?
+  propertyType    PropertyType
+  occupancy       OccupancyType?
+
+  loanPurpose        LoanPurpose
+  recoursePreference RecourseType?
+  timelineDays       Int?
+  closingDate        DateTime?
+  exitStrategy       String?
+  notes              String?
+
+  status      RequestStatus @default(SUBMITTED)
+  submittedAt DateTime      @default(now())
+
+  documents Document[]
+  matches   Match[]
+  comments  Comment[]
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  @@index([borrowerId])
+  @@index([status])
+  @@index([propertyState])
+  @@map("loan_requests")
+}
+
+// ---------------------------------------------------------------------------
+// Matching
+// ---------------------------------------------------------------------------
+
+model Match {
+  id            String       @id @default(cuid())
+  loanRequestId String
+  loanRequest   LoanRequest  @relation(fields: [loanRequestId], references: [id], onDelete: Cascade)
+  lenderId      String
+  lender        Lender       @relation(fields: [lenderId], references: [id], onDelete: Cascade)
+  loanProgramId String?
+  loanProgram   LoanProgram? @relation(fields: [loanProgramId], references: [id], onDelete: SetNull)
+
+  score   Int
+  reasons Json // { matches: string[], warnings: string[], disqualifiers: string[] }
+
+  status         MatchStatus @default(SUGGESTED)
+  overriddenById String?
+  overriddenBy   User?       @relation("OverriddenBy", fields: [overriddenById], references: [id])
+  overrideNote   String?
+
+  introducedAt DateTime?
+  respondedAt  DateTime?
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  @@unique([loanRequestId, loanProgramId])
+  @@index([loanRequestId, score])
+  @@index([lenderId])
+  @@index([status])
+  @@map("matches")
+}
+
+// ---------------------------------------------------------------------------
+// Documents (Supabase Storage pointers + AI extraction results)
+// ---------------------------------------------------------------------------
+
+model Document {
+  id            String       @id @default(cuid())
+  loanRequestId String?
+  loanRequest   LoanRequest? @relation(fields: [loanRequestId], references: [id], onDelete: Cascade)
+  lenderId      String?
+  lender        Lender?      @relation(fields: [lenderId], references: [id], onDelete: Cascade)
+
+  documentType DocumentType
+  fileName     String
+  storagePath  String // Supabase Storage object path
+  fileSize     Int?
+  mimeType     String?
+
+  uploadedById String?
+  uploadedBy   User?   @relation("UploadedBy", fields: [uploadedById], references: [id])
+
+  extractionStatus ExtractionStatus @default(NOT_APPLICABLE)
+  extractedData    Json?
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  @@index([loanRequestId])
+  @@index([lenderId])
+  @@map("documents")
+}
+
+// ---------------------------------------------------------------------------
+// Collaboration & activity
+// ---------------------------------------------------------------------------
+
+model Comment {
+  id            String      @id @default(cuid())
+  loanRequestId String
+  loanRequest   LoanRequest @relation(fields: [loanRequestId], references: [id], onDelete: Cascade)
+  authorId      String
+  author        User        @relation(fields: [authorId], references: [id])
+  body          String
+
+  createdAt DateTime @default(now())
+
+  @@index([loanRequestId])
+  @@map("comments")
+}
+
+model Notification {
+  id     String           @id @default(cuid())
+  userId String
+  user   User             @relation(fields: [userId], references: [id])
+  type   NotificationType
+  title  String
+  body   String?
+  isRead Boolean          @default(false)
+
+  relatedLoanRequestId String?
+  relatedMatchId       String?
+
+  createdAt DateTime @default(now())
+
+  @@index([userId, isRead])
+  @@map("notifications")
+}
+
+model ActivityLog {
+  id             String       @id @default(cuid())
+  organizationId String
+  organization   Organization @relation(fields: [organizationId], references: [id])
+  actorId        String?
+  actor          User?        @relation(fields: [actorId], references: [id])
+
+  action     String // e.g. "lender.created", "loan_request.matched"
+  entityType String
+  entityId   String
+  metadata   Json?
+
+  createdAt DateTime @default(now())
+
+  @@index([organizationId, createdAt])
+  @@map("activity_log")
+}
